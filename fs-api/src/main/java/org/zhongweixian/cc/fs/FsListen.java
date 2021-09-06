@@ -7,6 +7,8 @@ import org.apache.commons.lang3.StringUtils;
 import org.cti.cc.constant.Constants;
 import org.cti.cc.constant.FsConstant;
 import org.cti.cc.entity.RouteGetway;
+import org.cti.cc.entity.Station;
+import org.cti.cc.mapper.StationMapper;
 import org.cti.cc.po.CallInfo;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -20,6 +22,7 @@ import org.zhongweixian.cc.configration.Handler;
 import org.zhongweixian.cc.configration.HandlerContext;
 import org.zhongweixian.cc.fs.event.FsHangupEvent;
 import org.zhongweixian.cc.fs.event.base.FsBaseEvent;
+import org.zhongweixian.cc.util.RandomUtil;
 import org.zhongweixian.esl.inbound.Client;
 import org.zhongweixian.esl.inbound.IEslEventListener;
 import org.zhongweixian.esl.internal.Context;
@@ -41,17 +44,12 @@ import java.util.concurrent.*;
 public class FsListen {
     private Logger logger = LoggerFactory.getLogger(FsListen.class);
 
-    @Value("${fs.host:}")
-    private List<String> fsHosts;
+    @Autowired
+    private Station station;
 
-    @Value("${fs.ipv4:}")
-    private List<String> fsIpv4s;
+    @Autowired
+    private StationMapper stationMapper;
 
-    @Value("${fs.port:}")
-    private List<Integer> fsPorts;
-
-    @Value("${fs.password:}")
-    private List<String> fsPasswords;
 
     @Value("${audio.codecs:^^:G729:PCMU:PCMA}")
     private String codecs;
@@ -99,28 +97,34 @@ public class FsListen {
 
 
     public void start() {
-        if (CollectionUtils.isEmpty(fsHosts) || fsHosts.size() != fsPorts.size() || fsHosts.size() != fsPasswords.size()) {
+        Map<String, Object> params = new HashMap<>();
+        params.put("applicationType", 4);
+        params.put("applicationGroup", station.getApplicationGroup());
+        List<Station> fsStations = stationMapper.selectListByMap(params);
+
+        if (CollectionUtils.isEmpty(fsStations)) {
             return;
         }
-        for (int i = 0; i < fsHosts.size(); i++) {
-            connect(i, fsHosts.get(i), fsPorts.get(i), fsPasswords.get(i));
+        for (Station station : fsStations) {
+            connect(station.getHost(), station.getApplicationPort(), station.getPwd());
         }
         checkFsThread.scheduleAtFixedRate(() -> {
             checkConnect();
-        }, 10, 10, TimeUnit.SECONDS);
+        }, 2, 1, TimeUnit.MINUTES);
     }
 
     /**
-     * @param i
+     * 连接freeswitch
+     *
      * @param host
      * @param port
      * @param password
      * @return
      */
-    private Client connect(Integer i, String host, Integer port, String password) {
+    private Client connect(String host, Integer port, String password) {
         Client client = new Client();
         try {
-            fsClient.put(fsIpv4s.get(i), client);
+            fsClient.put(host + ":" + port, client);
             client.connect(new InetSocketAddress(host, port), password, 2);
         } catch (Exception e) {
             logger.error(e.getMessage(), e);
@@ -236,6 +240,7 @@ public class FsListen {
                 if (formatEvent == null) {
                     return;
                 }
+                formatEvent.setHostname(host + ":" + port);
 
                 /**
                  * 一个callId挂机处理必须使用一个相同的线程
@@ -302,13 +307,18 @@ public class FsListen {
      *
      */
     private void checkConnect() {
-        for (int i = 0; i < fsHosts.size(); i++) {
+        Map<String, Object> params = new HashMap<>();
+        params.put("applicationType", 4);
+        params.put("applicationGroup", station.getApplicationGroup());
+        List<Station> fsStations = stationMapper.selectListByMap(params);
+
+        for (Station station : fsStations) {
             try {
-                Client client = fsClient.get(fsIpv4s.get(i));
+                Client client = fsClient.get(station.getHost());
                 if (!client.isActivate()) {
-                    logger.info("freeswitch {}:{} is close", fsHosts.get(i), fsPorts.get(i));
+                    logger.info("freeswitch {}:{} is close", station.getApplicationHost(), station.getApplicationPort());
                     client.close();
-                    connect(i, fsHosts.get(i), fsPorts.get(i), fsPasswords.get(i));
+                    connect(station.getApplicationHost(), station.getApplicationPort(), station.getPwd());
                 }
             } catch (Exception e) {
 
@@ -355,7 +365,8 @@ public class FsListen {
      * @param sipHeaders
      */
     public void makeCall(RouteGetway routeGetway, String display, String called, String deviceId, String... sipHeaders) {
-        makeCall(fsIpv4s.get(0), routeGetway, display, called, deviceId, sipHeaders);
+        String media = RandomUtil.getRandomKey(fsClient.keySet());
+        makeCall(media, routeGetway, display, called, deviceId, sipHeaders);
     }
 
     /**
